@@ -1,6 +1,8 @@
 {
-  "name": "resume-tailor",
-  "version": "0.1.0",
+  "name": "resume-automation",
+  "version": "1.0.0",
+  "description": "Automated resume tailoring via Gemini API",
+  "private": true,
   "scripts": {
     "start": "node scripts/tailor_resume.js"
   },
