@@ -5,8 +5,8 @@
     "start": "node scripts/tailor_resume.js"
   },
   "dependencies": {
-    "pdf-parse": "^1.1.1",
-    "node-fetch": "^3.4.0",
+    "mammoth": "^1.4.19",
+    "marked": "^5.1.1",
     "minimist": "^1.2.8",
     "puppeteer": "^21.0.0"
   }
