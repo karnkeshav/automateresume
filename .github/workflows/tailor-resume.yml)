@@ -1,0 +1,64 @@
+name: Tailor Resume (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_title:
+        description: 'Job title (e.g. "Frontend Engineer")'
+        required: true
+        default: 'Software Engineer'
+      job_description:
+        description: 'Paste the full job description'
+        required: true
+        default: 'Enter JD here'
+      company_name:
+        description: 'Company name'
+        required: true
+        default: 'ExampleCorp'
+      resume_path:
+        description: 'Path to your resume DOCX file'
+        required: true
+        default: 'resumes/Keshav-resume.docx'
+      max_iterations:
+        description: 'Iterations for improvement'
+        required: false
+        default: '1'
+
+jobs:
+  tailor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ⭐ FIX APPLIED → npm ci removed, using safe npm install instead
+      - name: Install dependencies
+        run: |
+          echo "No package-lock.json — using npm install"
+          npm install --no-audit --no-fund
+
+      - name: Run Tailor Resume Script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: 'gemini-2.5-flash'
+        run: |
+          node ./scripts/tailor_resume.js \
+            --job-title "${{ inputs.job_title }}" \
+            --job-desc "${{ inputs.job_description }}" \
+            --company "${{ inputs.company_name }}" \
+            --resume-path "${{ inputs.resume_path }}" \
+            --max-iterations "${{ inputs.max_iterations }}"
+
+      - name: Upload Resume Outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailored-resume
+          path: ./output
