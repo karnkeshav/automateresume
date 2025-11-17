@@ -1,5 +1,5 @@
 // scripts/tailor_resume.js
-// Full resume-tailoring script.
+// Full resume-tailoring script with robust Gemini calls (tries candidateConfig then minimal payload).
 // Dependencies (package.json): mammoth, marked, minimist, puppeteer
 // Env required: GEMINI_API_KEY (AI Studio key). Optional: GEMINI_MODEL (default gemini-2.5-flash)
 
@@ -75,7 +75,10 @@ async function extractTextFromDocx(filePath) {
   return result.value.replace(/\r/g, '').trim();
 }
 
-// --- call Gemini v1 generateContent using global fetch ---
+// --- call Gemini v1 generateContent robustly ---
+// Tries two payload shapes:
+// 1) with candidateConfig: { contents: [...], candidateConfig: { temperature, maxOutputTokens } }
+// 2) minimal: { contents: [...] }
 async function callGemini(prompt, opts = {}) {
   if (typeof fetch === 'undefined') {
     throw new Error('Global fetch is not available in this Node runtime. Use Node 18+ (GitHub Actions uses Node 20).');
@@ -84,35 +87,69 @@ async function callGemini(prompt, opts = {}) {
   const model = opts.model || GEMINI_MODEL;
   const url = `${GEMINI_BASE}/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const body = {
-    contents: [
-      {
-        parts: [{ text: prompt }]
-      }
-    ],
+  const candidateConfig = {
     temperature: opts.temperature ?? 0.2,
+    // Some endpoints use maxOutputTokens, some use maxTokens; keep value but place inside candidateConfig
     maxOutputTokens: opts.maxOutputTokens ?? MAX_OUTPUT_TOKENS
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  const contents = [
+    {
+      parts: [{ text: prompt }]
+    }
+  ];
 
-  let json;
-  try {
-    json = await res.json();
-  } catch (e) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Invalid JSON from Gemini (status=${res.status}): ${text}`);
+  // Helper to send request and return {ok,json,status,text}
+  async function postJson(bodyObj) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj)
+    });
+    let json = null;
+    let text = null;
+    try { json = await res.json(); } catch (e) { text = await res.text().catch(() => null); }
+    return { ok: res.ok, status: res.status, json, text };
   }
 
-  if (!res.ok) {
-    throw new Error(`Gemini API error ${res.status}: ${JSON.stringify(json)}`);
+  // First attempt: candidateConfig style
+  const body1 = {
+    contents,
+    candidateConfig
+  };
+
+  let attempt1 = await postJson(body1);
+  if (attempt1.ok) {
+    return extractTextFromResponseJson(attempt1.json);
   }
 
-  // Extract text from common shapes
+  // If failed due to unknown fields mentioning temperature or maxOutputTokens, fall back
+  const errText = attempt1.json ? JSON.stringify(attempt1.json) : (attempt1.text || `status ${attempt1.status}`);
+  if (attempt1.status === 400 && /Unknown name.*temperature|Unknown name.*maxOutputTokens/i.test(errText)) {
+    // Try minimal payload
+    console.warn('Gemini rejected candidateConfig payload; retrying with minimal payload (contents only).');
+    const body2 = { contents };
+    const attempt2 = await postJson(body2);
+    if (attempt2.ok) return extractTextFromResponseJson(attempt2.json);
+
+    // if still fails, throw first error for debugging
+    throw new Error(`Gemini API error (both attempts failed). First: ${errText}. Second: ${attempt2.json ? JSON.stringify(attempt2.json) : attempt2.text}`);
+  }
+
+  // If error is not the unknown-field case, but attempt1 failed, try minimal payload anyway (some endpoints accept minimal)
+  const attempt2 = await postJson({ contents });
+  if (attempt2.ok) return extractTextFromResponseJson(attempt2.json);
+
+  // else throw helpful error
+  const msg1 = attempt1.json ? JSON.stringify(attempt1.json) : attempt1.text;
+  const msg2 = attempt2.json ? JSON.stringify(attempt2.json) : attempt2.text;
+  throw new Error(`Gemini API error. Attempt1: ${msg1}. Attempt2: ${msg2}`);
+}
+
+// Helper to extract text content from common Gemini response shapes
+function extractTextFromResponseJson(json) {
+  if (!json) return '';
+
   if (typeof json.output_text === 'string') return json.output_text;
 
   if (Array.isArray(json.candidates) && json.candidates[0]) {
@@ -134,7 +171,7 @@ async function callGemini(prompt, opts = {}) {
     return json.output[0].content.map(p => p.text || JSON.stringify(p)).join('\n');
   }
 
-  // fallback to raw JSON string
+  // fallback
   return JSON.stringify(json);
 }
 
