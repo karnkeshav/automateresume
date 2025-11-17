@@ -1,5 +1,5 @@
 // scripts/tailor_resume.js
-// Uses Node's global fetch (Node 18+ / Node 20). No node-fetch dependency required.
+// Uses Node's global fetch (Node 18+/20). No node-fetch dependency required.
 
 const fs = require('fs');
 const path = require('path');
@@ -7,10 +7,6 @@ const mammoth = require('mammoth');
 const { marked } = require('marked');
 const puppeteer = require('puppeteer');
 const argv = require('minimist')(process.argv.slice(2));
-
-// If global fetch is not available for any reason, use undici as a fallback
-// (undici is not installed by default; we rely on Node 20 global fetch)
-const _fetch = (typeof fetch !== 'undefined') ? fetch : undefined;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
@@ -34,9 +30,8 @@ async function extractTextFromDocx(p) {
 }
 
 async function callGemini(prompt, options = {}) {
-  // Use global fetch
   if (typeof fetch === 'undefined') {
-    throw new Error('Global fetch is not available in this Node runtime. Ensure Node 18+ or change the script to include a fetch polyfill.');
+    throw new Error('Global fetch is not available. Ensure Node 18+ (GitHub Actions uses Node 20).');
   }
 
   const url = `${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -65,22 +60,15 @@ async function callGemini(prompt, options = {}) {
     throw new Error(`Invalid JSON from Gemini: ${res.status} ${text}`);
   }
 
-  if (!res.ok) {
-    throw new Error("Gemini API Error: " + JSON.stringify(json));
-  }
+  if (!res.ok) throw new Error("Gemini API Error: " + JSON.stringify(json));
 
-  // Common response shapes
   if (json.output_text) return json.output_text;
 
   if (json.candidates && json.candidates[0]) {
     const c = json.candidates[0];
     if (typeof c.content === "string") return c.content;
-    if (Array.isArray(c.content)) {
-      return c.content.map(p => (typeof p === 'string' ? p : (p.text || JSON.stringify(p)))).join("\n");
-    }
-    if (c.output && Array.isArray(c.output)) {
-      return c.output.map(o => (o.text || JSON.stringify(o))).join("\n");
-    }
+    if (Array.isArray(c.content)) return c.content.map(p => (typeof p === 'string' ? p : (p.text || JSON.stringify(p)))).join("\n");
+    if (c.output && Array.isArray(c.output)) return c.output.map(o => (o.text || JSON.stringify(o))).join("\n");
     if (c.message && c.message.content) {
       if (typeof c.message.content === "string") return c.message.content;
       if (Array.isArray(c.message.content)) return c.message.content.map(x => x.text || JSON.stringify(x)).join("\n");
@@ -151,17 +139,12 @@ Return ONLY the final improved resume in Markdown.
 async function renderPDF(md, pathOut) {
   const templatePath = path.join(__dirname, "..", "templates", "resume_template.html");
   let htmlTemplate = "<html><body>{{CONTENT}}</body></html>";
-
-  if (fs.existsSync(templatePath)) {
-    htmlTemplate = fs.readFileSync(templatePath, "utf8");
-  }
-
+  if (fs.existsSync(templatePath)) htmlTemplate = fs.readFileSync(templatePath, "utf8");
   const html = htmlTemplate.replace("{{CONTENT}}", marked(md)).replace("{{TITLE}}", "Tailored Resume");
-
   if (!fs.existsSync("output")) fs.mkdirSync("output");
   fs.writeFileSync("output/rendered.html", html);
 
-  const browser = await puppeteer.launch({ args: ["--no-sandbox"] });
+  const browser = await puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   await page.setContent(html, { waitUntil: "networkidle0" });
   await page.pdf({ path: pathOut, format: "A4", printBackground: true });
@@ -171,11 +154,7 @@ async function renderPDF(md, pathOut) {
 (async () => {
   try {
     const absResume = path.isAbsolute(resumePath) ? resumePath : path.join(process.cwd(), resumePath);
-
-    if (!fs.existsSync(absResume)) {
-      throw new Error("Resume file not found: " + absResume);
-    }
-
+    if (!fs.existsSync(absResume)) throw new Error("Resume file not found: " + absResume);
     if (!fs.existsSync("output")) fs.mkdirSync("output");
 
     console.log("Extracting resume text...");
