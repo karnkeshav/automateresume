@@ -1,96 +1,94 @@
 // scripts/tailor_resume.js
-// Reads DOCX resume, calls Gemini generateContent (v1), performs recruiter review and fixes,
-// renders final Markdown to PDF. Writes artifacts to ./output/
-//
-// Requirements (package.json): mammoth, marked, puppeteer, node-fetch, minimist
-// Make sure GEMINI_API_KEY is set in env (GitHub Secrets).
-//
-// Usage (example):
-// node scripts/tailor_resume.js --job-title "SRE" --job-desc "..." --company "Acme" --resume-path "resumes/Keshav-resume.docx"
+// Uses Node's global fetch (Node 18+ / Node 20). No node-fetch dependency required.
 
 const fs = require('fs');
 const path = require('path');
-const fetch = require('node-fetch');
 const mammoth = require('mammoth');
 const { marked } = require('marked');
 const puppeteer = require('puppeteer');
 const argv = require('minimist')(process.argv.slice(2));
 
+// If global fetch is not available for any reason, use undici as a fallback
+// (undici is not installed by default; we rely on Node 20 global fetch)
+const _fetch = (typeof fetch !== 'undefined') ? fetch : undefined;
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
-  console.error('ERROR: GEMINI_API_KEY environment variable is required.');
+  console.error("ERROR: GEMINI_API_KEY missing in environment.");
   process.exit(1);
 }
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1/models';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1/models";
 
-const jobTitle = argv['job-title'] || argv.jobTitle || 'Software Engineer';
-const jobDesc = argv['job-desc'] || argv.jobDesc || argv['job-description'] || '';
-const company = argv.company || 'Company';
-const resumePath = argv['resume-path'] || 'resumes/Keshav-resume.docx';
-const maxIterations = parseInt(argv['max-iterations'] || 1, 10) || 1;
-const MAX_OUTPUT_TOKENS = parseInt(process.env.MAX_OUTPUT_TOKENS || 2048, 10);
+const jobTitle = argv["job-title"] || argv.jobTitle || "Software Engineer";
+const jobDesc = argv["job-desc"] || argv.jobDesc || argv["job-description"] || "";
+const company = argv["company"] || "Company";
+const resumePath = argv["resume-path"] || "resumes/Keshav-resume.docx";
+const maxIterations = parseInt(argv["max-iterations"] || 1, 10) || 1;
 
-async function extractTextFromDocx(filePath) {
-  const buffer = fs.readFileSync(filePath);
+async function extractTextFromDocx(p) {
+  const buffer = fs.readFileSync(p);
   const result = await mammoth.extractRawText({ buffer });
-  return result.value.replace(/\r/g, '').trim();
+  return result.value.replace(/\r/g, "").trim();
 }
 
-async function callGemini(prompt, opts = {}) {
-  const model = opts.model || GEMINI_MODEL;
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${GEMINI_API_KEY}`;
+async function callGemini(prompt, options = {}) {
+  // Use global fetch
+  if (typeof fetch === 'undefined') {
+    throw new Error('Global fetch is not available in this Node runtime. Ensure Node 18+ or change the script to include a fetch polyfill.');
+  }
+
+  const url = `${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const body = {
     contents: [
       {
-        parts: [
-          { text: prompt }
-        ]
+        parts: [{ text: prompt }]
       }
     ],
-    temperature: opts.temperature ?? 0.2,
-    maxOutputTokens: opts.maxOutputTokens ?? MAX_OUTPUT_TOKENS
+    temperature: options.temperature ?? 0.2,
+    maxOutputTokens: options.maxOutputTokens ?? 4096
   };
 
   const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
   });
 
-  const json = await res.json().catch(() => null);
+  let json;
+  try {
+    json = await res.json();
+  } catch (e) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Invalid JSON from Gemini: ${res.status} ${text}`);
+  }
+
   if (!res.ok) {
-    const message = json ? JSON.stringify(json) : `HTTP ${res.status}`;
-    throw new Error(`Gemini API error ${res.status}: ${message}`);
+    throw new Error("Gemini API Error: " + JSON.stringify(json));
   }
 
-  // Extract text from common shapes
-  if (json && typeof json.output_text === 'string') return json.output_text;
+  // Common response shapes
+  if (json.output_text) return json.output_text;
 
-  if (json && Array.isArray(json.candidates) && json.candidates[0]) {
-    const cand = json.candidates[0];
-    if (typeof cand.content === 'string') return cand.content;
-    if (Array.isArray(cand.content)) {
-      const parts = cand.content.map(p => (typeof p === 'string' ? p : (p.text || JSON.stringify(p)))).join('\n');
-      if (parts.trim()) return parts;
+  if (json.candidates && json.candidates[0]) {
+    const c = json.candidates[0];
+    if (typeof c.content === "string") return c.content;
+    if (Array.isArray(c.content)) {
+      return c.content.map(p => (typeof p === 'string' ? p : (p.text || JSON.stringify(p)))).join("\n");
     }
-    if (cand.output && Array.isArray(cand.output)) {
-      const out = cand.output.map(o => (o.text || JSON.stringify(o))).join('\n');
-      if (out.trim()) return out;
+    if (c.output && Array.isArray(c.output)) {
+      return c.output.map(o => (o.text || JSON.stringify(o))).join("\n");
     }
-    if (cand.message && cand.message.content) {
-      if (typeof cand.message.content === 'string') return cand.message.content;
-      if (Array.isArray(cand.message.content)) {
-        return cand.message.content.map(c => (c.text || JSON.stringify(c))).join('\n');
-      }
+    if (c.message && c.message.content) {
+      if (typeof c.message.content === "string") return c.message.content;
+      if (Array.isArray(c.message.content)) return c.message.content.map(x => x.text || JSON.stringify(x)).join("\n");
     }
   }
 
-  if (json && Array.isArray(json.output) && json.output[0] && Array.isArray(json.output[0].content)) {
-    const outParts = json.output[0].content.map(p => p.text || JSON.stringify(p)).join('\n');
-    if (outParts.trim()) return outParts;
+  if (json.output && Array.isArray(json.output) && json.output[0] && Array.isArray(json.output[0].content)) {
+    return json.output[0].content.map(p => p.text || JSON.stringify(p)).join("\n");
   }
 
   return JSON.stringify(json);
@@ -98,126 +96,111 @@ async function callGemini(prompt, opts = {}) {
 
 function buildTailorPrompt(resumeText, jobTitle, jobDesc) {
   return `
-You are an expert resume writer. Tailor the following existing resume text to the job.
+You are an expert resume writer. Tailor the following resume to the job role.
 
-=== EXISTING RESUME TEXT START ===
+=== ORIGINAL RESUME ===
 ${resumeText}
-=== EXISTING RESUME TEXT END ===
+=== END OF RESUME ===
 
 Job title: ${jobTitle}
 Job description:
 ${jobDesc}
 
-Task:
-1) Produce a tailored resume (in Markdown) that emphasizes relevant skills, achievements, and keywords matching the job description.
-2) Keep it concise — 1-2 pages equivalent, with bullet points for responsibilities & achievements.
-3) Where possible, quantify achievements (use reasonable placeholders if specific numbers are not present).
-4) Use headings: Name, Contact (leave placeholders), Summary, Skills, Experience (with bullets), Education, Certifications (if any).
-5) Return ONLY the resume in Markdown (no analysis, no extra commentary).
+Create a resume in Markdown:
+- Focus on measurable achievements
+- Improve clarity
+- Use ATS-friendly bullet points
+- Keep it max 2 pages
+- ONLY output the resume in Markdown.
 `;
 }
 
-function buildRecruiterReviewPrompt(tailoredResumeMarkdown, company, jobTitle, jobDesc) {
+function buildRecruiterPrompt(tailored, company, jobTitle, jobDesc) {
   return `
-You are now a recruiter at ${company} reviewing a candidate for the role: ${jobTitle}.
+You are a recruiter at ${company}. Review the candidate's resume for the job: ${jobTitle}.
 
 Job description:
 ${jobDesc}
 
-Candidate tailored resume:
-${tailoredResumeMarkdown}
+Candidate resume:
+${tailored}
 
-Task:
-1) As the recruiter, list up to 10 specific gaps or weaknesses where the candidate does not match the job (be explicit: missing skills, missing experience, unclear quantification, mismatched seniority).
-2) For each gap, explain why it's important for this role, and give a short actionable suggestion (one sentence) on how to fix it in the resume or cover letter.
-Return the response as JSON with fields: { "gaps": [ { "issue": "...", "importance": "...", "fix": "..." } ] }
+List weaknesses or gaps in JSON: 
+{
+  "gaps": [
+    {"issue":"...", "importance":"...", "fix":"..."}
+  ]
+}
 `;
 }
 
-function buildFixPrompt(tailoredResumeMarkdown, gapsJson) {
+function buildFixPrompt(tailored, gaps) {
   return `
-You are an expert resume writer. Given the tailored resume below and the recruiter's identified gaps, update and improve the resume to address the gaps.
+You are a senior resume expert. Improve the resume below using the gap analysis.
 
-Tailored resume:
-${tailoredResumeMarkdown}
+Resume:
+${tailored}
 
-Recruiter gaps (JSON):
-${gapsJson}
+Gaps JSON:
+${gaps}
 
-Task:
-1) Modify the resume to address the gaps as best as possible. If the fix requires adding quantification that is not present, add conservative phrasing and mark any invented numbers with parentheses and a note that they should be replaced.
-2) Return only the final updated resume in Markdown.
+Return ONLY the final improved resume in Markdown.
 `;
 }
 
-async function saveMarkdownAsPdf(markdownText, outPdfPath, title = 'Tailored Resume') {
-  const templatePath = path.join(__dirname, '..', 'templates', 'resume_template.html');
-  const template = fs.existsSync(templatePath) ? fs.readFileSync(templatePath, 'utf8') : '<html><body>{{CONTENT}}</body></html>';
-  const htmlResume = marked.parse(markdownText);
-  const filled = template.replace('{{CONTENT}}', htmlResume).replace('{{TITLE}}', title);
+async function renderPDF(md, pathOut) {
+  const templatePath = path.join(__dirname, "..", "templates", "resume_template.html");
+  let htmlTemplate = "<html><body>{{CONTENT}}</body></html>";
 
-  if (!fs.existsSync(path.join(process.cwd(), 'output'))) fs.mkdirSync(path.join(process.cwd(), 'output'));
-  fs.writeFileSync(path.join(process.cwd(), 'output', 'tailored_resume_rendered.html'), filled, 'utf8');
+  if (fs.existsSync(templatePath)) {
+    htmlTemplate = fs.readFileSync(templatePath, "utf8");
+  }
 
-  const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const html = htmlTemplate.replace("{{CONTENT}}", marked(md)).replace("{{TITLE}}", "Tailored Resume");
+
+  if (!fs.existsSync("output")) fs.mkdirSync("output");
+  fs.writeFileSync("output/rendered.html", html);
+
+  const browser = await puppeteer.launch({ args: ["--no-sandbox"] });
   const page = await browser.newPage();
-  await page.setContent(filled, { waitUntil: 'networkidle0' });
-  await page.pdf({ path: outPdfPath, format: 'A4', printBackground: true, margin: { top: '20mm', bottom: '20mm' } });
+  await page.setContent(html, { waitUntil: "networkidle0" });
+  await page.pdf({ path: pathOut, format: "A4", printBackground: true });
   await browser.close();
 }
 
 (async () => {
   try {
     const absResume = path.isAbsolute(resumePath) ? resumePath : path.join(process.cwd(), resumePath);
+
     if (!fs.existsSync(absResume)) {
-      console.error('Resume file not found at', absResume);
-      process.exit(2);
+      throw new Error("Resume file not found: " + absResume);
     }
 
-    console.log('Extracting text from', absResume);
+    if (!fs.existsSync("output")) fs.mkdirSync("output");
+
+    console.log("Extracting resume text...");
     const resumeText = await extractTextFromDocx(absResume);
-    console.log(`Extracted resume text length: ${resumeText.length}`);
 
-    // Stage 1: Tailor
-    console.log('Calling Gemini to tailor resume...');
-    const tailorPrompt = buildTailorPrompt(resumeText, jobTitle, jobDesc);
-    const tailored = await callGemini(tailorPrompt, { temperature: 0.2, maxOutputTokens: 4096 });
-    if (!fs.existsSync('./output')) fs.mkdirSync('./output');
-    fs.writeFileSync('./output/tailored_resume_stage1.md', tailored, 'utf8');
-    console.log('Stage 1 tailored resume saved.');
+    console.log("Stage 1: Tailoring resume...");
+    const tailored = await callGemini(buildTailorPrompt(resumeText, jobTitle, jobDesc));
+    fs.writeFileSync("output/tailored_stage1.md", tailored);
 
-    // Stage 2: Recruiter review
-    console.log('Calling Gemini to role-play recruiter and identify gaps...');
-    const reviewPrompt = buildRecruiterReviewPrompt(tailored, company, jobTitle, jobDesc);
-    const gapsRaw = await callGemini(reviewPrompt, { temperature: 0.1, maxOutputTokens: 1024 });
-    let gapsJson = gapsRaw;
-    try {
-      const m = gapsRaw.match(/\{[\s\S]*\}/);
-      if (m) gapsJson = m[0];
-      JSON.parse(gapsJson);
-    } catch (e) {
-      console.warn('Warning: could not parse recruiter gaps strictly as JSON; saving raw text.');
-      gapsJson = gapsRaw;
-    }
-    fs.writeFileSync('./output/recruiter_gaps.json.txt', gapsJson, 'utf8');
-    console.log('Recruiter gaps saved.');
+    console.log("Stage 2: Recruiter review...");
+    const gaps = await callGemini(buildRecruiterPrompt(tailored, company, jobTitle, jobDesc));
+    fs.writeFileSync("output/recruiter_gaps.json", gaps);
 
-    // Stage 3: Fix gaps and finalize
-    console.log('Calling Gemini to fix gaps and produce final resume...');
-    const fixPrompt = buildFixPrompt(tailored, gapsJson);
-    const fixedResume = await callGemini(fixPrompt, { temperature: 0.15, maxOutputTokens: 4096 });
-    fs.writeFileSync('./output/tailored_resume_final.md', fixedResume, 'utf8');
+    console.log("Stage 3: Fixing resume...");
+    const improved = await callGemini(buildFixPrompt(tailored, gaps));
+    fs.writeFileSync("output/tailored_final.md", improved);
 
-    // Stage 4: Render PDF
-    const outPdf = path.join(process.cwd(), 'output', 'tailored_resume_final.pdf');
-    console.log('Rendering PDF to', outPdf);
-    await saveMarkdownAsPdf(fixedResume, outPdf, `${jobTitle} - Tailored Resume`);
+    console.log("Stage 4: Rendering PDF...");
+    await renderPDF(improved, "output/tailored_final.pdf");
 
-    console.log('All done. Artifacts written to ./output/');
-    process.exit(0);
+    console.log("DONE. Check output/");
   } catch (err) {
-    console.error('ERROR:', err && err.message ? err.message : err);
-    try { if (!fs.existsSync('./output')) fs.mkdirSync('./output'); fs.writeFileSync('./output/error.txt', String(err)); } catch (e) {}
-    process.exit(10);
+    console.error("ERROR:", err);
+    if (!fs.existsSync("output")) fs.mkdirSync("output");
+    fs.writeFileSync("output/error.txt", String(err));
+    process.exit(1);
   }
 })();
