@@ -4,7 +4,8 @@
   "description": "Automated resume tailoring via Gemini API",
   "private": true,
   "scripts": {
-    "start": "node scripts/tailor_resume.js"
+    "start": "node scripts/tailor_resume.js",
+    "test": "node .github/init.js"
   },
   "dependencies": {
     "mammoth": "^1.4.19",
