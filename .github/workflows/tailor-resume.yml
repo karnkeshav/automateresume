@@ -1,4 +1,4 @@
-name: Tailor Resume (manual)
+name: Tailor Resume (manual) - safe install
 
 on:
   workflow_dispatch:
@@ -27,22 +27,57 @@ on:
 jobs:
   tailor:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ⭐ FIX APPLIED → npm ci removed, using safe npm install instead
-      - name: Install dependencies
+      - name: Show current package.json (for debug)
         run: |
-          echo "No package-lock.json — using npm install"
+          echo "---- repo package.json (start) ----"
+          if [ -f package.json ]; then cat package.json; else echo "(none)"; fi
+          echo "---- repo package.json (end) ----"
+
+      - name: Overwrite package.json with safe minimal dependencies
+        run: |
+          cat > package.json <<'JSON'
+{
+  "name": "resume-tailor",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/tailor_resume.js"
+  },
+  "dependencies": {
+    "mammoth": "^1.4.19",
+    "marked": "^5.1.1",
+    "minimist": "^1.2.8",
+    "puppeteer": "^21.0.0"
+  }
+}
+JSON
+          echo "Wrote safe package.json:"
+          cat package.json
+
+      - name: Clean npm cache (optional but safe)
+        run: |
+          npm cache verify || true
+
+      - name: Install dependencies (no package-lock required)
+        run: |
+          echo "Installing dependencies with npm install (safe package.json)"
           npm install --no-audit --no-fund
+
+      - name: Ensure script exists
+        run: |
+          if [ ! -f ./scripts/tailor_resume.js ]; then echo "ERROR: scripts/tailor_resume.js not found" && exit 2; fi
+          echo "script found: ./scripts/tailor_resume.js"
 
       - name: Run Tailor Resume Script
         env:
